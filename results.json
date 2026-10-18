@@ -1,0 +1,32 @@
+{
+  "question": "Can a class-weighted word and character TF-IDF linear model with a cross-validated threshold beat a standard word-TF-IDF logistic regression on spam recall for real SMS messages?",
+  "method": "UCI SMS Spam Collection (ucimlrepo, with direct UCI archive fallback); stratified 80/20 split (seed 42); all tuning by 5-fold CV on the training part; test set used once for both models.",
+  "dataset": {
+    "name": "UCI SMS Spam Collection (id 228)",
+    "source_url": "https://archive.ics.uci.edu/dataset/228/sms+spam+collection",
+    "n_rows": 5574,
+    "n_train": 4459,
+    "n_test": 1115,
+    "same_as_paper": false,
+    "baseline_is_papers_method": false
+  },
+  "metric_name": "spam-class recall on the held-out test split",
+  "higher_is_better": true,
+  "baseline": "Word TF-IDF + default logistic regression (threshold 0.5), no tuning.",
+  "improved": "Word (1-2 gram) + char_wb (2-5 gram) TF-IDF, class_weight='balanced' logistic regression, C chosen by 5-fold CV on average precision, decision threshold chosen on out-of-fold training predictions to maximise spam recall subject to precision >= 0.90.",
+  "metrics": {
+    "baseline_score": 0.8120805369127517,
+    "improved_score": 0.9731543624161074,
+    "improvement": 0.1610738255033557,
+    "baseline_accuracy": 0.9748878923766816,
+    "improved_accuracy": 0.9856502242152466,
+    "baseline_macro_f1": 0.9410052910052911,
+    "improved_macro_f1": 0.9696982049923226,
+    "baseline_f1": 0.8962962962962963,
+    "improved_f1": 0.9477124183006536,
+    "chosen_C": 10.0,
+    "chosen_threshold": 0.14340870292423322,
+    "n_spam_test": 149
+  },
+  "notes": "Single split, so the test estimate has wide uncertainty (about 149 spam messages in test). Both models are deterministic given seed 42 (lbfgs, fixed CV folds), so no multi-seed std is reported. The threshold is tuned on 80%-data out-of-fold models but applied to a model refit on all training data, which can shift calibration slightly. The UCI SMS data is a real-message stand-in, not the paper's synthetic LLM-generated data, and the baseline is a classical linear model, not the paper's fine-tuned small language model. The data was loaded from the UCI archive file directly when the ucimlrepo download for id 228 is unavailable; the content is the same file."
+}
