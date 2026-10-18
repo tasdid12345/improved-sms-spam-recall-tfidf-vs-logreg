@@ -1,16 +1,20 @@
 """Question: can a class-weighted word + character TF-IDF linear model with a
 CV-tuned threshold beat a standard word-TF-IDF logistic regression on spam
-recall? Data: UCI SMS Spam Collection (id 228) via the ucimlrepo package."""
+recall? Data: UCI SMS Spam Collection (id 228), loaded via the ucimlrepo package
+with a fallback to the same UCI archive file fetched directly."""
+import io
 import json
 import socket
 import sys
 import time
+import zipfile
 
 import matplotlib
 matplotlib.use("Agg")  # headless plotting on CI
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
 from ucimlrepo import fetch_ucirepo
 from sklearn.base import clone
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -25,6 +29,7 @@ SEED = 42
 MAX_ROWS = 200_000          # subsample cap (dataset is ~5.6k rows, so inactive)
 PRECISION_FLOOR = 0.90      # threshold must keep out-of-fold spam precision >= this
 SOURCE_URL = "https://archive.ics.uci.edu/dataset/228/sms+spam+collection"
+RAW_ZIP_URL = "https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip"
 T0 = time.time()
 
 
@@ -32,28 +37,57 @@ def log(msg):
     print(f"[{time.time() - T0:6.1f}s] {msg}", flush=True)
 
 
-def load_data():
-    """Download (with timeout + retry/backoff) and return texts and 0/1 labels (1 = spam)."""
-    socket.setdefaulttimeout(60)  # 60 s timeout on all network calls (ucimlrepo has no timeout arg)
-    data = None
-    for attempt in range(4):
-        try:
-            data = fetch_ucirepo(id=228)
-            break
-        except Exception as e:  # covers HTTP 429/5xx and connection errors
-            wait = 2 ** attempt
-            log(f"download failed ({e}); retrying in {wait}s")
-            time.sleep(wait)
-    if data is None:
-        sys.exit("could not download the SMS Spam Collection")
+def _from_ucimlrepo():
+    """Primary source: ucimlrepo package."""
+    data = fetch_ucirepo(id=228)
     label_col = data.targets.columns[0]
-    df = pd.concat([data.features, data.targets], axis=1)
-    text_col = [c for c in df.columns if c != label_col and df[c].dtype == object][0]
-    df = df[[text_col, label_col]].dropna()
+    text_col = data.features.columns[0]
+    return pd.DataFrame({
+        "text": data.features[text_col].to_numpy(),
+        "label": data.targets[label_col].to_numpy(),
+    })
+
+
+def _from_uci_zip():
+    """Fallback source: the same UCI archive file (SMSSpamCollection, tab-separated label/text)."""
+    r = requests.get(RAW_ZIP_URL, timeout=60)
+    r.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        name = [n for n in z.namelist() if n.endswith("SMSSpamCollection")][0]
+        raw = z.read(name).decode("utf-8", errors="replace")
+    rows = [line.split("\t", 1) for line in raw.splitlines() if "\t" in line]
+    return pd.DataFrame(rows, columns=["label", "text"])
+
+
+def load_data():
+    """Return texts and 0/1 labels (1 = spam). Timeouts and retries on all network calls."""
+    socket.setdefaulttimeout(60)  # 60 s timeout on all network calls
+    df = None
+    for attempt in range(2):
+        try:
+            df = _from_ucimlrepo()
+            break
+        except Exception as e:
+            wait = 2 ** attempt
+            log(f"ucimlrepo download failed ({e}); retrying in {wait}s")
+            time.sleep(wait)
+    if df is None:
+        log("ucimlrepo unavailable for id 228; using direct UCI archive download")
+        for attempt in range(3):
+            try:
+                df = _from_uci_zip()
+                break
+            except Exception as e:  # covers HTTP 429/5xx and connection errors
+                wait = 2 ** attempt
+                log(f"direct download failed ({e}); retrying in {wait}s")
+                time.sleep(wait)
+    if df is None:
+        sys.exit("could not download the SMS Spam Collection")
+    df = df[["text", "label"]].dropna()
     if len(df) > MAX_ROWS:  # same subsample rule would apply to both models
         df = df.sample(MAX_ROWS, random_state=SEED)
-    y = (df[label_col].astype(str).str.strip().str.lower() == "spam").astype(int).to_numpy()
-    X = df[text_col].astype(str).to_numpy()
+    y = (df["label"].astype(str).str.strip().str.lower() == "spam").astype(int).to_numpy()
+    X = df["text"].astype(str).to_numpy()
     return X, y
 
 
@@ -127,9 +161,10 @@ fig.tight_layout()
 fig.savefig("figures/recall_comparison.png", dpi=120)
 
 # ---- Results ----
+n_spam_test = int(yte.sum())
 results = {
     "question": "Can a class-weighted word and character TF-IDF linear model with a cross-validated threshold beat a standard word-TF-IDF logistic regression on spam recall for real SMS messages?",
-    "method": "UCI SMS Spam Collection via ucimlrepo; stratified 80/20 split (seed 42); all tuning by 5-fold CV on the training part; test set used once for both models.",
+    "method": "UCI SMS Spam Collection (ucimlrepo, with direct UCI archive fallback); stratified 80/20 split (seed 42); all tuning by 5-fold CV on the training part; test set used once for both models.",
     "dataset": {
         "name": "UCI SMS Spam Collection (id 228)",
         "source_url": SOURCE_URL,
@@ -155,9 +190,15 @@ results = {
         "improved_f1": imp_res["f1"],
         "chosen_C": float(search.best_params_["logisticregression__C"]),
         "chosen_threshold": threshold,
-        "n_spam_test": int(yte.sum()),
+        "n_spam_test": n_spam_test,
     },
-    "notes": "Single split, so the test estimate has wide uncertainty (about 75 spam messages in test). Both models are deterministic given seed 42 (lbfgs, fixed CV folds), so no multi-seed std is reported. The threshold is tuned on 80%-data out-of-fold models but applied to a model refit on all training data, which can shift calibration slightly. The UCI SMS data is a real-message stand-in, not the paper's synthetic LLM-generated data, and the baseline is a classical linear model, not the paper's fine-tuned small language model.",
+    "notes": (f"Single split, so the test estimate has wide uncertainty (about {n_spam_test} spam messages in test). "
+              "Both models are deterministic given seed 42 (lbfgs, fixed CV folds), so no multi-seed std is reported. "
+              "The threshold is tuned on 80%-data out-of-fold models but applied to a model refit on all training data, "
+              "which can shift calibration slightly. The UCI SMS data is a real-message stand-in, not the paper's "
+              "synthetic LLM-generated data, and the baseline is a classical linear model, not the paper's fine-tuned "
+              "small language model. The data was loaded from the UCI archive file directly when the ucimlrepo "
+              "download for id 228 is unavailable; the content is the same file."),
 }
 with open("results.json", "w", encoding="utf-8") as f:
     json.dump(results, f, indent=2, ensure_ascii=False)
